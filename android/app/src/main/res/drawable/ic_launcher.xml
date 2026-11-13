@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 흰 바탕에 검은 선: 책 + 무선 표시 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M0,0h108v108h-108z" />
+    <path android:strokeColor="#000000" android:strokeWidth="5" android:fillColor="#00000000"
+        android:pathData="M30,40 L30,82 L78,82 L78,40 Z" />
+    <path android:strokeColor="#000000" android:strokeWidth="4" android:fillColor="#00000000"
+        android:pathData="M54,40 L54,82" />
+    <path android:strokeColor="#000000" android:strokeWidth="4" android:fillColor="#00000000"
+        android:pathData="M40,30 Q54,18 68,30" />
+    <path android:strokeColor="#000000" android:strokeWidth="4" android:fillColor="#00000000"
+        android:pathData="M46,35 Q54,28 62,35" />
+</vector>

@@ -1,0 +1,86 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+      - name: Build APK
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon 2>&1 | tee build.log
+      - name: Report build errors
+        if: failure()
+        run: |
+          grep -E "^e: |error:|What went wrong|FAILURE|Unresolved|Exception" build.log | head -60 > errors.txt || true
+          msg=$(sed 's/%/%25/g' errors.txt | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=android-errors::${msg}"
+      - run: cp app/build/outputs/apk/debug/app-debug.apk ../ereader-link-${{ github.run_number }}.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: ereader-link-${{ github.run_number }}.apk
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: pc
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exe
+        run: |
+          set -o pipefail
+          dotnet build EreaderLink.csproj -c Release -p:Version=0.1.${{ github.run_number }} 2>&1 | tee build.log
+      - name: Report build errors
+        if: failure()
+        run: |
+          grep -E "error " build.log | sort -u | head -60 > errors.txt || true
+          msg=$(sed 's/%/%25/g' errors.txt | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=windows-errors::${msg}"
+      - run: cp bin/Release/net48/EreaderLink.exe "../EreaderLink-${{ github.run_number }}.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: EreaderLink-${{ github.run_number }}.exe
+
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish to Releases (latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest ereader-link-${{ github.run_number }}.apk EreaderLink-${{ github.run_number }}.exe \
+            --title "최신 빌드 #${{ github.run_number }}" \
+            --notes "이북리더: ereader-link-${{ github.run_number }}.apk 설치 / PC: EreaderLink-${{ github.run_number }}.exe 실행 (설치 없이 바로 실행). 둘을 같은 와이파이에 두고 켜면 자동으로 연결돼요." \
+            --target ${{ github.sha }}
