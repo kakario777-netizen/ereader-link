@@ -10,6 +10,7 @@ namespace EreaderLink
         static void Main()
         {
             ServicePointManager.Expect100Continue = false;
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;   // GitHub 접속용
             ServicePointManager.DefaultConnectionLimit = 8;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);

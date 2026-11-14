@@ -26,6 +26,8 @@ class MainActivity : Activity() {
     private lateinit var detail: TextView
     private lateinit var doing: TextView
     private lateinit var permBtn: Button
+    private lateinit var updBtn: Button
+    private lateinit var updText: TextView
     private var lastText = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,6 +56,10 @@ class MainActivity : Activity() {
 
         permBtn = button("모든 파일 접근 허용하기") { askPermission() }
         root.addView(permBtn)
+        updBtn = button("업데이트") { Updater.downloadAndInstall(this) }
+        root.addView(updBtn)
+        updText = label(16f)
+        root.addView(updText)
         root.addView(button("끄고 나가기") {
             startService(Intent(this, LinkService::class.java).setAction(LinkService.ACTION_STOP))
             finishAndRemoveTask()
@@ -74,6 +80,7 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
         }
         startForegroundService(Intent(this, LinkService::class.java))
+        Updater.check(this)
     }
 
     private fun button(t: String, onClick: () -> Unit) = Button(this).apply {
@@ -117,6 +124,15 @@ class MainActivity : Activity() {
 
     private fun refresh() {
         val allOk = Storage.canAccessAll()
+        val upd = Updater.available
+        updBtn.visibility = if (upd != null && !Updater.busy) View.VISIBLE else View.GONE
+        if (upd != null) {
+            val t = "새 버전으로 업데이트 (빌드 #${upd.build})"
+            if (updBtn.text.toString() != t) updBtn.text = t
+        }
+        val us = Updater.status ?: ""
+        if (updText.text.toString() != us) updText.text = us
+        updText.visibility = if (us.isEmpty()) View.GONE else View.VISIBLE
         permBtn.visibility = if (allOk) View.GONE else View.VISIBLE
 
         val s = when {
@@ -129,7 +145,7 @@ class MainActivity : Activity() {
         val d = buildString {
             if (!allOk) append("아래 버튼을 눌러 '모든 파일 접근'을 켜 주세요.\n")
             if (LinkState.connected) append("PC: ${LinkState.pcAddress}\n")
-            append("이 기기: ${FileServer.deviceName()}\n")
+            append("이 기기: ${FileServer.deviceName()}  (빌드 #${Updater.currentBuild(this@MainActivity)})\n")
             append(if (ips.isEmpty()) "와이파이가 연결돼 있지 않아요" else "IP: ${ips.joinToString(", ")}")
             LinkState.error?.let { append("\n$it") }
         }

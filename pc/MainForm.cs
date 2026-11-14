@@ -43,7 +43,9 @@ namespace EreaderLink
         ImageList icons;
         readonly Dictionary<string, string> typeNames = new Dictionary<string, string>();
         StatusStrip status;
-        ToolStripStatusLabel lConn, lCount, lProg, lCancel;
+        ToolStripStatusLabel lConn, lCount, lProg, lCancel, lUpdate;
+        Updater.Release newVersion;
+        bool restarting;
         ToolStripProgressBar prog;
         Panel wait;
         Label waitTitle, waitText;
@@ -62,7 +64,7 @@ namespace EreaderLink
         public MainForm()
         {
             using (var g = CreateGraphics()) k = g.DpiX / 96f;
-            Text = "이북 링크";
+            Text = "이북 링크  (빌드 #" + Updater.Current + ")";
             Font = new Font("Malgun Gothic", 9f);
             Size = new Size(S(1000), S(660));
             StartPosition = FormStartPosition.CenterScreen;
@@ -176,7 +178,9 @@ namespace EreaderLink
             prog = new ToolStripProgressBar { Maximum = 1000, Width = S(160), Visible = false };
             lCancel = new ToolStripStatusLabel("취소") { IsLink = true, Visible = false };
             lCancel.Click += (s, e) => { try { pCts?.Cancel(); } catch { } };
-            status.Items.AddRange(new ToolStripItem[] { lConn, lCount, lProg, prog, lCancel });
+            lUpdate = new ToolStripStatusLabel("") { IsLink = true, Visible = false, BorderSides = ToolStripStatusLabelBorderSides.Left };
+            lUpdate.Click += (s, e) => _ = DoUpdate();
+            status.Items.AddRange(new ToolStripItem[] { lConn, lCount, lProg, prog, lCancel, lUpdate });
 
             // 연결 전 안내 화면
             wait = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(S(40)) };
@@ -243,11 +247,48 @@ namespace EreaderLink
             ipBox.Text = LoadLast() ?? "";
             finder.Start();
             _ = TryLast();
+            _ = CheckUpdate();
+        }
+
+        // ════════════════════════ 자체 업데이트 ════════════════════════
+
+        async Task CheckUpdate()
+        {
+            await Task.Run(() => Updater.Cleanup());
+            var r = await Task.Run(() => Updater.Check());
+            if (r == null) return;
+            newVersion = r;
+            lUpdate.Text = "새 버전 #" + r.Build + " 업데이트";
+            lUpdate.ToolTipText = "누르면 받아서 바로 다시 켜져요 (지금 #" + Updater.Current + ")";
+            lUpdate.Visible = true;
+        }
+
+        async Task DoUpdate()
+        {
+            var r = newVersion;
+            if (r == null) return;
+            if (transferring)
+            {
+                MessageBox.Show(this, "전송이 끝난 뒤에 업데이트해 주세요.", "이북 링크");
+                return;
+            }
+            lUpdate.Visible = false;
+            bool ok = await Job("업데이트 받는 중", async ct =>
+            {
+                pTotal = r.Size;
+                await Task.Run(() => Updater.Apply(r, n => Interlocked.Add(ref pDone, n), ct));
+            });
+            if (ok)
+            {
+                restarting = true;
+                Close();
+            }
+            else lUpdate.Visible = true;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (transferring && MessageBox.Show(this, "전송 중이에요. 그래도 닫을까요?", "이북 링크",
+            if (!restarting && transferring && MessageBox.Show(this, "전송 중이에요. 그래도 닫을까요?", "이북 링크",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             {
                 e.Cancel = true;
