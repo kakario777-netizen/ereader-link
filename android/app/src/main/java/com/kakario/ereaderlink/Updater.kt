@@ -35,16 +35,28 @@ object Updater {
         if (Build.VERSION.SDK_INT >= 28) info.longVersionCode.toInt() else @Suppress("DEPRECATION") info.versionCode
     }.getOrDefault(0)
 
-    /** 앱을 켤 때 조용히 확인 */
-    fun check(ctx: Context) {
-        if (busy) return
+    @Volatile private var lastCheck = 0L
+
+    /**
+     * 새 버전 확인 → 있으면 바로 받아서 설치까지 자동으로 (버튼 안 눌러도 됨).
+     * 단, PC·폰과 파일을 주고받는 중이면 끝날 때까지 미룸.
+     * '이 출처 허용'이 아직 꺼져 있으면 화면에 업데이트 버튼만 띄움 (처음 한 번 허용 필요).
+     */
+    fun check(ctx: Context, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (busy || (!force && now - lastCheck < 10 * 60_000L)) return
+        lastCheck = now
+        val app = ctx.applicationContext
         thread(isDaemon = true) {
             runCatching {
                 val r = fetchLatest()
-                available = if (r != null && r.build > currentBuild(ctx)) r else null
+                available = if (r != null && r.build > currentBuild(app)) r else null
+                if (available != null && canInstall(app) && !LinkState.connected) downloadAndInstall(app)
             }
         }
     }
+
+    fun canInstall(ctx: Context) = Build.VERSION.SDK_INT < 26 || ctx.packageManager.canRequestPackageInstalls()
 
     fun downloadAndInstall(ctx: Context) {
         val r = available ?: return
@@ -52,7 +64,8 @@ object Updater {
         val app = ctx.applicationContext
         if (Build.VERSION.SDK_INT >= 26 && !app.packageManager.canRequestPackageInstalls()) {
             status = "'이 출처 허용'을 켠 뒤 다시 눌러 주세요"
-            ctx.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${app.packageName}")))
+            ctx.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${app.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             return
         }
         busy = true

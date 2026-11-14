@@ -93,6 +93,7 @@ class BrowseActivity : Activity() {
         root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(actions) })
         setContentView(root)
         showDevices()
+        Updater.check(this)
     }
 
     override fun onNewIntent(intent: Intent) {

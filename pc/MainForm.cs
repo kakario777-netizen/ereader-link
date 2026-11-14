@@ -261,6 +261,8 @@ namespace EreaderLink
             lUpdate.Text = "새 버전 #" + r.Build + " 업데이트";
             lUpdate.ToolTipText = "누르면 받아서 바로 다시 켜져요 (지금 #" + Updater.Current + ")";
             lUpdate.Visible = true;
+            // 켤 때 새 버전이 있으면 바로 받아서 다시 켬 (전송 중이 아닐 때)
+            if (!transferring) await DoUpdate();
         }
 
         async Task DoUpdate()

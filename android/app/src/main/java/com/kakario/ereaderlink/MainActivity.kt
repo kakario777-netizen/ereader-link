@@ -59,7 +59,10 @@ class MainActivity : Activity() {
         root.addView(button("다른 기기 열기 (폰 → 이북리더)") {
             startActivity(Intent(this, BrowseActivity::class.java))
         })
-        updBtn = button("업데이트") { Updater.downloadAndInstall(this) }
+        updBtn = button("업데이트") {
+            if (Updater.canInstall(this)) Updater.downloadAndInstall(this)
+            else { Updater.status = "'이 출처 허용'을 켜고 돌아오면 자동으로 업데이트돼요"; Updater.downloadAndInstall(this) }
+        }
         root.addView(updBtn)
         updText = label(16f)
         root.addView(updText)
@@ -83,7 +86,6 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
         }
         startForegroundService(Intent(this, LinkService::class.java))
-        Updater.check(this)
     }
 
     private fun button(t: String, onClick: () -> Unit) = Button(this).apply {
@@ -117,6 +119,10 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (!LinkState.running) startForegroundService(Intent(this, LinkService::class.java))
+        Updater.check(this)
+        // '이 출처 허용'을 켜고 돌아온 경우 바로 이어서 업데이트
+        if (Updater.available != null && !Updater.busy && Updater.canInstall(this) && !LinkState.connected)
+            Updater.downloadAndInstall(this)
         ui.post(tick)
     }
 

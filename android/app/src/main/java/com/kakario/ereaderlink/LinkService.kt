@@ -75,6 +75,13 @@ class LinkService : Service() {
         }
         discovery = Discovery().also { it.start() }
         LinkState.running = true
+        // 켜 둔 채로 오래 두는 이북리더도 알아서 최신으로 (6시간마다, 전송 중이 아닐 때)
+        kotlin.concurrent.thread(isDaemon = true) {
+            while (LinkState.running) {
+                Updater.check(applicationContext, force = true)
+                Thread.sleep(6 * 60 * 60 * 1000L)
+            }
+        }
     }
 
     override fun onDestroy() {
