@@ -75,7 +75,12 @@ class BrowseActivity : Activity() {
             textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(Color.BLACK)
             setPadding(pad, 0, pad, dp(6))
         }
-        root.addView(title)
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(SettingsMenu.button(this@BrowseActivity))
+        })
         rootsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(pad, 0, pad, 0) }
         root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(rootsRow) })
         pathText = TextView(this).apply { textSize = 13f; setTextColor(Color.DKGRAY); setPadding(pad, dp(4), pad, dp(4)) }

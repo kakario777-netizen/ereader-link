@@ -56,6 +56,25 @@ object Updater {
         }
     }
 
+    /** 설정 메뉴의 '새 버전 확인' — 결과를 알려 주고, 새 버전이면 바로 업데이트 */
+    fun checkNow(ctx: Context, done: (String) -> Unit) {
+        val app = ctx.applicationContext
+        if (busy) { done(status ?: "업데이트 중이에요"); return }
+        thread(isDaemon = true) {
+            val cur = currentBuild(app)
+            val r = runCatching { fetchLatest() }.getOrNull()
+            when {
+                r == null -> done("새 버전을 확인하지 못했어요. 인터넷 연결을 확인해 주세요.")
+                r.build <= cur -> { available = null; done("최신 버전이에요 (빌드 #$cur)") }
+                else -> {
+                    available = r
+                    done("새 버전 #${r.build}을(를) 받아서 업데이트해요")
+                    downloadAndInstall(ctx)
+                }
+            }
+        }
+    }
+
     fun canInstall(ctx: Context) = Build.VERSION.SDK_INT < 26 || ctx.packageManager.canRequestPackageInstalls()
 
     fun downloadAndInstall(ctx: Context) {

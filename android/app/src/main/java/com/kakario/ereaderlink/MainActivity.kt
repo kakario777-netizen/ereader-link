@@ -48,7 +48,13 @@ class MainActivity : Activity() {
             if (bold) typeface = Typeface.DEFAULT_BOLD
             setPadding(0, dp(10), 0, dp(10))
         }
-        root.addView(label(30f, true).apply { text = "이북 링크" })
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(label(30f, true).apply { text = "이북 링크" }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(SettingsMenu.button(this@MainActivity))
+        }
+        root.addView(head)
         root.addView(View(this).apply { setBackgroundColor(Color.BLACK) }, LinearLayout.LayoutParams(-1, dp(2)))
         state = label(24f, true); root.addView(state)
         detail = label(18f); root.addView(detail)
