@@ -56,6 +56,9 @@ class MainActivity : Activity() {
 
         permBtn = button("모든 파일 접근 허용하기") { askPermission() }
         root.addView(permBtn)
+        root.addView(button("다른 기기 열기 (폰 → 이북리더)") {
+            startActivity(Intent(this, BrowseActivity::class.java))
+        })
         updBtn = button("업데이트") { Updater.downloadAndInstall(this) }
         root.addView(updBtn)
         updText = label(16f)
