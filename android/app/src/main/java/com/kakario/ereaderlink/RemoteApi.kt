@@ -75,6 +75,7 @@ class RemoteApi(val host: String, val port: Int) {
     fun mkdir(p: String) { call("POST", "/mkdir?p=" + enc(p)) }
     fun delete(p: String) { call("POST", "/delete?p=" + enc(p), 600_000) }
     fun rename(p: String, to: String) { call("POST", "/rename?p=" + enc(p) + "&to=" + enc(to), 600_000) }
+    fun copy(p: String, to: String) { call("POST", "/copy?p=" + enc(p) + "&to=" + enc(to), 600_000) }
 
     fun download(p: String, out: OutputStream, onBytes: (Int) -> Unit, cancel: AtomicBoolean) {
         val c = open("GET", "/file?p=" + enc(p), 30_000)

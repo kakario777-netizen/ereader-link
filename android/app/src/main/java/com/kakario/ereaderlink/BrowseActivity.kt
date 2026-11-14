@@ -2,17 +2,16 @@ package com.kakario.ereaderlink
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.InputType
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -25,8 +24,6 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import java.io.File
-import java.io.FileOutputStream
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,91 +31,123 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 폰에서 이북리더(다른 기기)를 탐색기처럼 열기.
- *  - 같은 와이파이의 기기를 자동으로 찾아 목록에 보여 줌
- *  - 폴더 이동, 폰에서 올리기, 폰으로 받기, 삭제, 이름 바꾸기, 새 폴더
- *  - 다른 앱에서 '공유 → 이북 링크'로 보낸 파일을 원하는 폴더에 올리기
+ * 폰 ↔ 이북리더 탐색기.
+ *  맨 위: [내 폰] [상대 기기] 탭
+ *  그 아래: [내장 메모리] [외장 메모리] 탭
+ *  그 아래: 파일 목록 — 길게 누르면 복사·이동·이름 바꾸기·삭제
+ *  복사/이동을 고르면 아래쪽에 '이곳에 붙여넣기' 막대가 떠 있음 → 원하는 기기·폴더로 가서 붙여넣기
  */
 class BrowseActivity : Activity() {
     private val io = Executors.newSingleThreadExecutor()
-    private var finder: DeviceFinder? = null
-    private val devices = mutableListOf<Triple<String, String, Int>>()   // 이름, IP, 포트
 
-    private var api: RemoteApi? = null
-    private var info: RemoteApi.Info? = null
-    private var cur: String? = null
-    private var items: List<RemoteApi.Item> = emptyList()
+    // 기기
+    private lateinit var local: LocalFs
+    private var remote: RemoteFs? = null
+    private var tab = 0                       // 0 = 내 폰, 1 = 상대 기기
+    private val curPath = arrayOfNulls<String>(2)
+    private var finder: DeviceFinder? = null
+    private val devices = mutableListOf<Triple<String, String, Int>>()
+    private var connecting = false
+
+    // 목록
+    private var items: List<Entry> = emptyList()
+    private var listError: String? = null
     private val selected = linkedSetOf<String>()
-    private var shared: List<Uri> = emptyList()
+    private var selectMode = false
+
+    // 붙여넣기 대기 (복사/이동)
+    private class Clip(val fromTab: Int, val fs: Fs?, val items: List<Entry>, val move: Boolean, val uris: List<Uri> = emptyList())
+    private var clip: Clip? = null
+
+    // 작업
     private val cancel = AtomicBoolean(false)
     @Volatile private var busy = false
 
-    private lateinit var title: TextView
+    // 화면
+    private lateinit var tabPhone: TextView
+    private lateinit var tabRemote: TextView
     private lateinit var rootsRow: LinearLayout
     private lateinit var pathText: TextView
     private lateinit var list: ListView
     private lateinit var status: TextView
+    private lateinit var clipBar: LinearLayout
+    private lateinit var clipText: TextView
     private lateinit var actions: LinearLayout
     private val adapter = RowAdapter()
     private val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA)
 
+    private val fs: Fs? get() = if (tab == 0) local else remote
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        readShared(intent)
-        val pad = dp(12)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(0, pad, 0, 0)
-        }
-        title = TextView(this).apply {
-            textSize = 22f; setTypeface(typeface, Typeface.BOLD); setTextColor(Color.BLACK)
-            setPadding(pad, 0, pad, dp(6))
-        }
-        root.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(SettingsMenu.button(this@BrowseActivity))
-        })
-        rootsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(pad, 0, pad, 0) }
+        local = LocalFs(this)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        Insets.apply(this, root)
+
+        // ① 기기 탭 + 설정
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        tabPhone = tabView("내 폰") { switchTab(0) }
+        tabRemote = tabView("상대 기기") { switchTab(1) }
+        head.addView(tabPhone, LinearLayout.LayoutParams(0, dp(50), 1f))
+        head.addView(tabRemote, LinearLayout.LayoutParams(0, dp(50), 1f))
+        head.addView(SettingsMenu.button(this))
+        root.addView(head)
+        root.addView(line())
+
+        // ② 내장/외장 탭
+        rootsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(10), dp(8), dp(10), dp(4)) }
         root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(rootsRow) })
-        pathText = TextView(this).apply { textSize = 13f; setTextColor(Color.DKGRAY); setPadding(pad, dp(4), pad, dp(4)) }
+        pathText = TextView(this).apply {
+            textSize = 13f; setTextColor(Color.DKGRAY); setPadding(dp(14), dp(2), dp(14), dp(6))
+            ellipsize = TextUtils.TruncateAt.START; isSingleLine = true
+        }
         root.addView(pathText)
-        root.addView(View(this).apply { setBackgroundColor(Color.LTGRAY) }, LinearLayout.LayoutParams(-1, 1))
+        root.addView(line())
+
+        // ③ 탐색기
         list = ListView(this).apply {
             adapter = this@BrowseActivity.adapter
             setOnItemClickListener { _, _, pos, _ -> onTap(pos) }
             setOnItemLongClickListener { _, _, pos, _ -> onLongTap(pos); true }
         }
         root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        status = TextView(this).apply { textSize = 14f; setTextColor(Color.BLACK); setPadding(pad, dp(6), pad, dp(6)) }
+
+        // ④ 아래쪽: 진행 상황 / 붙여넣기 막대 / 버튼
+        status = TextView(this).apply { textSize = 13f; setTextColor(Color.BLACK); setPadding(dp(14), dp(4), dp(14), dp(2)) }
         root.addView(status)
-        actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), 0, dp(6), dp(8)) }
+        clipBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(30, 30, 30))
+            setPadding(dp(14), dp(6), dp(8), dp(6))
+            visibility = View.GONE
+        }
+        clipText = TextView(this).apply { setTextColor(Color.WHITE); textSize = 14f; maxLines = 2 }
+        clipBar.addView(clipText, LinearLayout.LayoutParams(0, -2, 1f))
+        clipBar.addView(barButton("이곳에 붙여넣기", bold = true) { paste() })
+        clipBar.addView(barButton("취소") { clip = null; render() })
+        root.addView(clipBar, LinearLayout.LayoutParams(-1, -2))
+        actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), dp(2), dp(6), dp(4)) }
         root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(actions) })
         setContentView(root)
-        showDevices()
+
+        readShared(intent)
+        startFinder()
+        getSharedPreferences("browse", MODE_PRIVATE).getString("last", null)?.let { tryConnectQuiet(it) }
+        // 공유로 들어왔으면 상대 기기 탭부터
+        switchTab(if (clip?.uris?.isNotEmpty() == true) 1 else 0)
         Updater.check(this)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         readShared(intent)
-        render()
+        if (clip?.uris?.isNotEmpty() == true) switchTab(1) else render()
     }
 
-    private fun readShared(i: Intent?) {
-        if (i == null) return
-        @Suppress("DEPRECATION")
-        shared = when (i.action) {
-            Intent.ACTION_SEND -> listOfNotNull(
-                if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                else i.getParcelableExtra(Intent.EXTRA_STREAM))
-            Intent.ACTION_SEND_MULTIPLE ->
-                (if (Build.VERSION.SDK_INT >= 33) i.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                 else i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)).orEmpty()
-            else -> shared
-        }
+    override fun onResume() {
+        super.onResume()
+        if (tab == 0 && listError != null) reload()   // 권한 허용하고 돌아온 경우
     }
 
     override fun onDestroy() {
@@ -128,182 +157,278 @@ class BrowseActivity : Activity() {
         super.onDestroy()
     }
 
-    // ───────────── 기기 고르기 ─────────────
+    /** 다른 앱에서 '공유 → 이북 링크'로 보낸 파일 = 붙여넣기 대기 */
+    private fun readShared(i: Intent?) {
+        if (i == null) return
+        @Suppress("DEPRECATION")
+        val uris: List<Uri> = when (i.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else i.getParcelableExtra(Intent.EXTRA_STREAM))
+            Intent.ACTION_SEND_MULTIPLE ->
+                (if (Build.VERSION.SDK_INT >= 33) i.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                 else i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)).orEmpty()
+            else -> emptyList()
+        }
+        if (uris.isNotEmpty()) clip = Clip(-1, null, emptyList(), move = false, uris = uris)
+    }
 
-    private fun showDevices() {
-        api = null; info = null; cur = null; items = emptyList(); selected.clear()
-        devices.clear()
+    // ───────────── 상대 기기 찾기 / 연결 ─────────────
+
+    private fun startFinder() {
         finder?.stop()
+        devices.clear()
         finder = DeviceFinder { name, host, port ->
             runOnUiThread {
                 if (devices.none { it.second == host }) {
                     devices += Triple(name, host, port)
-                    // 처음 찾은 기기가 하나면 바로 연결
-                    if (devices.size == 1 && api == null) connect(host, port, name) else render()
+                    if (remote == null && devices.size == 1) connect(host, port, name) else render()
                 }
             }
         }.also { it.start() }
-        val last = getSharedPreferences("browse", MODE_PRIVATE).getString("last", null)
-        if (last != null) tryConnectQuiet(last)
-        render()
     }
 
     private fun tryConnectQuiet(host: String) {
         io.execute {
             val a = RemoteApi(host, LinkState.HTTP_PORT)
             val inf = runCatching { a.info() }.getOrNull() ?: return@execute
-            runOnUiThread { if (api == null) connected(a, inf) }
+            runOnUiThread { if (remote == null) connected(a, inf) }
         }
     }
 
     private fun connect(host: String, port: Int, name: String) {
+        if (connecting) return
+        connecting = true
         status.text = "$name 에 연결하는 중…"
         io.execute {
             val a = RemoteApi(host, port)
-            try {
-                val inf = a.info()
-                runOnUiThread { if (api == null) connected(a, inf) }
-            } catch (e: Exception) {
-                runOnUiThread { status.text = "연결하지 못했어요: ${e.message}" }
+            val r = runCatching { a.info() }
+            runOnUiThread {
+                connecting = false
+                r.onSuccess { connected(a, it) }.onFailure { status.text = "연결하지 못했어요: ${it.message}" }
             }
         }
     }
 
     private fun connected(a: RemoteApi, inf: RemoteApi.Info) {
-        api = a; info = inf
-        finder?.stop()
+        remote = RemoteFs(a, inf)
+        curPath[1] = null
         getSharedPreferences("browse", MODE_PRIVATE).edit().putString("last", a.host).apply()
+        status.text = ""
         if (!inf.allAccess) msg("${inf.name}의 이북 링크 앱에서 '모든 파일 접근 허용하기'를 켜 주세요. 안 켜면 폴더가 비어 보일 수 있어요.")
-        go(inf.roots.firstOrNull()?.path ?: "/")
+        if (tab == 1) openTab() else render()
     }
 
-    // ───────────── 폴더 보기 ─────────────
+    private fun disconnect() {
+        remote = null
+        curPath[1] = null
+        if (clip?.fromTab == 1) clip = null
+        startFinder()
+        if (tab == 1) { items = emptyList(); listError = null }
+        render()
+    }
+
+    // ───────────── 탭 / 폴더 이동 ─────────────
+
+    private fun switchTab(t: Int) {
+        tab = t
+        selected.clear(); selectMode = false
+        openTab()
+    }
+
+    private fun openTab() {
+        val f = fs
+        if (f == null) { items = emptyList(); listError = null; render(); return }
+        val p = curPath[tab] ?: f.roots().firstOrNull()?.path
+        if (p == null) { items = emptyList(); render(); return }
+        go(p)
+    }
 
     private fun go(path: String, select: String? = null) {
-        val a = api ?: return
+        val f = fs ?: return
+        val t = tab
         status.text = "불러오는 중…"
         io.execute {
-            try {
-                val list = a.list(path).sortedWith(compareBy<RemoteApi.Item>({ !it.dir }, { it.name.lowercase() }))
-                runOnUiThread {
-                    cur = path; items = list; selected.clear()
-                    status.text = ""
-                    render()
-                    if (select != null) {
-                        val i = items.indexOfFirst { it.name == select }
-                        if (i >= 0) this.list.setSelection(i)
-                    }
+            val r = runCatching { f.list(path).sortedWith(compareBy<Entry>({ !it.dir }, { it.name.lowercase() })) }
+            runOnUiThread {
+                if (t != tab || f !== fs) return@runOnUiThread
+                status.text = ""
+                curPath[tab] = path
+                r.onSuccess { items = it; listError = null }
+                 .onFailure { items = emptyList(); listError = it.message ?: "열지 못했어요" }
+                if (!selectMode) selected.clear()
+                render()
+                if (select != null) {
+                    val i = rows().indexOfFirst { it is Entry && it.name == select }
+                    if (i >= 0) list.setSelection(i)
                 }
-            } catch (e: Exception) {
-                runOnUiThread { status.text = "열지 못했어요: ${e.message}"; if (cur == null) render() }
+                // 상대 기기와 연결이 끊긴 경우
+                val ex = r.exceptionOrNull()
+                if (f is RemoteFs && (ex is java.net.ConnectException || ex is java.net.SocketTimeoutException)) {
+                    disconnect()
+                    status.text = "상대 기기와 연결이 끊겼어요. 다시 찾는 중…"
+                }
             }
         }
     }
 
-    private fun reload() { cur?.let { go(it) } }
+    private fun reload() { curPath[tab]?.let { go(it) } ?: openTab() }
 
-    private fun isRoot(p: String) = info?.roots?.any { it.path == p } == true
+    private fun isRoot(p: String) = fs?.roots()?.any { it.path == p } == true
 
     private fun display(p: String): String {
-        val r = info?.roots?.filter { p == it.path || p.startsWith(it.path.trimEnd('/') + "/") }?.maxByOrNull { it.path.length }
+        val r = fs?.roots()?.filter { p == it.path || p.startsWith(it.path.trimEnd('/') + "/") }?.maxByOrNull { it.path.length }
             ?: return p
         return r.label + p.substring(r.path.trimEnd('/').length)
     }
 
-    private fun onTap(pos: Int) {
-        if (api == null) {
-            val d = devices.getOrNull(pos) ?: return
-            connect(d.second, d.third, d.first)
-            return
-        }
-        val it = items.getOrNull(pos) ?: return
-        if (selected.isNotEmpty()) { toggle(it); return }
-        if (it.dir) go(it.path)
-        else fileMenu(it)
-    }
-
-    private fun onLongTap(pos: Int) {
-        if (api == null) return
-        items.getOrNull(pos)?.let { toggle(it) }
-    }
-
-    private fun toggle(it: RemoteApi.Item) {
-        if (!selected.remove(it.path)) selected += it.path
-        render()
-    }
-
-    private fun fileMenu(it: RemoteApi.Item) {
-        AlertDialog.Builder(this)
-            .setTitle(it.name)
-            .setItems(arrayOf("폰으로 받기", "받아서 열기", "이름 바꾸기", "삭제")) { _, w ->
-                when (w) {
-                    0 -> download(listOf(it), open = false)
-                    1 -> download(listOf(it), open = true)
-                    2 -> rename(it)
-                    3 -> delete(listOf(it))
-                }
-            }.show()
+    private fun goUp() {
+        val c = curPath[tab] ?: return
+        if (isRoot(c)) return
+        go(RemoteApi.parent(c), RemoteApi.name(c))
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        val c = curPath[tab]
         when {
             busy -> cancel.set(true)
-            selected.isNotEmpty() -> { selected.clear(); render() }
-            api != null && cur != null && !isRoot(cur!!) -> {
-                val from = RemoteApi.name(cur!!)
-                go(RemoteApi.parent(cur!!), from)
-            }
+            selectMode -> { selectMode = false; selected.clear(); render() }
+            fs != null && c != null && !isRoot(c) -> goUp()
             else -> @Suppress("DEPRECATION") super.onBackPressed()
         }
+    }
+
+    // ───────────── 목록 행 ─────────────
+
+    private object UpRow
+
+    /** 화면에 그릴 행들: 상대 기기 미연결이면 기기 목록, 아니면 ".." + 파일들 */
+    private fun rows(): List<Any> {
+        if (tab == 1 && remote == null) return devices
+        val c = curPath[tab]
+        val up = if (c != null && !isRoot(c)) listOf<Any>(UpRow) else emptyList()
+        return up + items
+    }
+
+    private fun onTap(pos: Int) {
+        when (val r = rows().getOrNull(pos)) {
+            is Triple<*, *, *> -> connect(r.second as String, r.third as Int, r.first as String)
+            UpRow -> goUp()
+            is Entry -> when {
+                selectMode -> toggle(r)
+                r.dir -> go(r.path)
+                else -> itemMenu(r)
+            }
+        }
+    }
+
+    private fun onLongTap(pos: Int) {
+        val r = rows().getOrNull(pos) as? Entry ?: return
+        if (selectMode) toggle(r) else itemMenu(r)
+    }
+
+    private fun toggle(e: Entry) {
+        if (!selected.remove(e.path)) selected += e.path
+        render()
+    }
+
+    /** 길게 누르면 뜨는 메뉴 (PC의 오른쪽 클릭) */
+    private fun itemMenu(e: Entry) {
+        val opts = arrayOf("복사", "이동", "이름 바꾸기", "삭제", "여러 개 선택")
+        AlertDialog.Builder(this)
+            .setTitle(e.name)
+            .setItems(opts) { _, w ->
+                when (w) {
+                    0 -> setClip(listOf(e), move = false)
+                    1 -> setClip(listOf(e), move = true)
+                    2 -> rename(e)
+                    3 -> delete(listOf(e))
+                    4 -> { selectMode = true; selected.clear(); selected += e.path; render() }
+                }
+            }.show()
+    }
+
+    private fun setClip(sel: List<Entry>, move: Boolean) {
+        clip = Clip(tab, fs, sel, move)
+        selectMode = false; selected.clear()
+        render()
     }
 
     // ───────────── 화면 그리기 ─────────────
 
     private fun render() {
-        val a = api
-        val inf = info
+        val r = remote
+        styleTab(tabPhone, tab == 0)
+        styleTab(tabRemote, tab == 1)
+        tabRemote.text = r?.title ?: if (devices.isEmpty()) "상대 기기 (찾는 중)" else "상대 기기"
+
+        // 내장/외장 탭
         rootsRow.removeAllViews()
-        actions.removeAllViews()
-        if (a == null || inf == null) {
-            title.text = "기기 고르기"
-            pathText.text = if (devices.isEmpty()) "같은 와이파이에서 이북 링크 앱이 켜진 기기를 찾는 중…" else "연결할 기기를 눌러 주세요"
-            action("IP로 연결") { askIp() }
-            action("닫기") { finish() }
-            adapter.notifyDataSetChanged()
-            return
-        }
-        title.text = inf.name
-        for (r in inf.roots) {
-            val on = cur?.let { it == r.path || it.startsWith(r.path.trimEnd('/') + "/") } == true
-            rootsRow.addView(chip(r.label, on) { go(r.path) })
-        }
-        pathText.text = cur?.let { display(it) } ?: ""
-        if (busy) {
-            action("취소") { cancel.set(true) }
-        } else if (selected.isNotEmpty()) {
-            val sel = items.filter { it.path in selected }
-            action("폰으로 받기 (${sel.size})") { download(sel, open = false) }
-            action("삭제") { delete(sel) }
-            if (sel.size == 1) action("이름 바꾸기") { rename(sel[0]) }
-            action("모두 선택") { selected.clear(); items.forEach { selected += it.path }; render() }
-            action("선택 해제") { selected.clear(); render() }
+        val f = fs
+        val c = curPath[tab]
+        if (f != null) {
+            for (root in f.roots()) {
+                val on = c != null && (c == root.path || c.startsWith(root.path.trimEnd('/') + "/"))
+                rootsRow.addView(chip(root.label, on) { go(root.path) })
+            }
+            if (tab == 1) rootsRow.addView(chip("기기 바꾸기", false) { disconnect() })
+            pathText.text = listError ?: c?.let { display(it) } ?: ""
+            pathText.setTextColor(if (listError != null) Color.rgb(190, 0, 0) else Color.DKGRAY)
         } else {
-            if (shared.isNotEmpty()) action("여기에 올리기 (${shared.size}개)", bold = true) { val s = shared; shared = emptyList(); upload(s) }
-            action("폰에서 올리기") { pick() }
-            action("새 폴더") { newFolder() }
-            action("새로고침") { reload() }
-            action("기기 바꾸기") { showDevices() }
+            pathText.setTextColor(Color.DKGRAY)
+            pathText.text = if (devices.isEmpty()) "같은 와이파이에서 이북 링크 앱이 켜진 기기를 찾는 중…" else "연결할 기기를 눌러 주세요"
+        }
+
+        // 붙여넣기 막대
+        val cl = clip
+        if (cl != null && !busy) {
+            val n = if (cl.uris.isNotEmpty()) cl.uris.size else cl.items.size
+            val what = if (cl.uris.isEmpty() && n == 1) "'${cl.items[0].name}'" else "${n}개"
+            val from = when { cl.uris.isNotEmpty() -> "공유한 파일"; cl.fromTab == 0 -> "내 폰"; else -> remote?.title ?: "상대 기기" }
+            clipText.text = "$from $what ${if (cl.move) "이동" else "복사"} — 넣을 폴더로 가서 붙여넣기"
+            clipBar.visibility = View.VISIBLE
+        } else clipBar.visibility = View.GONE
+
+        // 아래 버튼
+        actions.removeAllViews()
+        when {
+            busy -> action("취소") { cancel.set(true) }
+            f == null -> {
+                action("IP로 연결") { askIp() }
+                action("다시 찾기") { startFinder(); render() }
+            }
+            selectMode -> {
+                val sel = items.filter { it.path in selected }
+                action("복사 (${sel.size})") { if (sel.isNotEmpty()) setClip(sel, false) }
+                action("이동") { if (sel.isNotEmpty()) setClip(sel, true) }
+                action("삭제") { if (sel.isNotEmpty()) delete(sel) }
+                action("모두 선택") { items.forEach { selected += it.path }; render() }
+                action("선택 끝") { selectMode = false; selected.clear(); render() }
+            }
+            else -> {
+                if (tab == 0 && !Storage.canAccessAll()) action("모든 파일 접근 허용", bold = true) { askAllFiles() }
+                action("새 폴더") { newFolder() }
+                action("여러 개 선택") { selectMode = true; selected.clear(); render() }
+                action("새로고침") { reload() }
+            }
         }
         adapter.notifyDataSetChanged()
     }
 
-    private fun action(text: String, bold: Boolean = false, click: () -> Unit) {
-        actions.addView(Button(this).apply {
-            this.text = text; isAllCaps = false; textSize = 15f
-            if (bold) setTypeface(typeface, Typeface.BOLD)
-            setOnClickListener { click() }
-        }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
+    private fun styleTab(v: TextView, on: Boolean) {
+        v.setTextColor(if (on) Color.BLACK else Color.GRAY)
+        v.setTypeface(Typeface.DEFAULT, if (on) Typeface.BOLD else Typeface.NORMAL)
+        v.setBackgroundColor(if (on) Color.rgb(238, 238, 238) else Color.WHITE)
+    }
+
+    private fun tabView(text: String, click: () -> Unit) = TextView(this).apply {
+        this.text = text
+        textSize = 17f
+        gravity = Gravity.CENTER
+        isSingleLine = true
+        ellipsize = TextUtils.TruncateAt.END
+        setOnClickListener { click() }
     }
 
     private fun chip(text: String, on: Boolean, click: () -> Unit) = TextView(this).apply {
@@ -316,19 +441,41 @@ class BrowseActivity : Activity() {
         setOnClickListener { click() }
     }
 
+    private fun action(text: String, bold: Boolean = false, click: () -> Unit) {
+        actions.addView(Button(this).apply {
+            this.text = text; isAllCaps = false; textSize = 14f
+            if (bold) setTypeface(typeface, Typeface.BOLD)
+            setOnClickListener { click() }
+        }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(4) })
+    }
+
+    private fun barButton(text: String, bold: Boolean = false, click: () -> Unit) = TextView(this).apply {
+        this.text = text
+        textSize = 15f
+        setTextColor(if (bold) Color.rgb(255, 214, 90) else Color.WHITE)
+        if (bold) setTypeface(typeface, Typeface.BOLD)
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        setOnClickListener { click() }
+    }
+
+    private fun line() = View(this).apply {
+        setBackgroundColor(Color.rgb(220, 220, 220))
+        layoutParams = LinearLayout.LayoutParams(-1, 1)
+    }
+
     inner class RowAdapter : BaseAdapter() {
-        override fun getCount() = if (api == null) devices.size else items.size
+        override fun getCount() = rows().size
         override fun getItem(p: Int): Any = p
         override fun getItemId(p: Int) = p.toLong()
         override fun getView(p: Int, convert: View?, parent: ViewGroup?): View {
             val row = (convert as? LinearLayout) ?: LinearLayout(this@BrowseActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(10), dp(12), dp(10))
+                setPadding(dp(14), dp(10), dp(14), dp(10))
                 addView(ImageView(context), LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(12) })
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    addView(TextView(context).apply { textSize = 16f; setTextColor(Color.BLACK) })
+                    addView(TextView(context).apply { textSize = 16f; setTextColor(Color.BLACK); maxLines = 2 })
                     addView(TextView(context).apply { textSize = 12f; setTextColor(Color.GRAY) })
                 }, LinearLayout.LayoutParams(0, -2, 1f))
             }
@@ -336,19 +483,25 @@ class BrowseActivity : Activity() {
             val texts = row.getChildAt(1) as LinearLayout
             val name = texts.getChildAt(0) as TextView
             val sub = texts.getChildAt(1) as TextView
-            if (api == null) {
-                val d = devices[p]
-                icon.setImageResource(R.drawable.ic_launcher)
-                name.text = d.first
-                sub.text = d.second
-                row.setBackgroundColor(Color.WHITE)
-            } else {
-                val it = items[p]
-                icon.setImageResource(if (it.dir) R.drawable.ic_folder else R.drawable.ic_file)
-                name.text = it.name
-                val date = if (it.mtime > 0) fmt.format(Date(it.mtime)) else ""
-                sub.text = if (it.dir) date else "$date   ${size(it.size)}"
-                row.setBackgroundColor(if (it.path in selected) Color.rgb(205, 225, 250) else Color.WHITE)
+            row.setBackgroundColor(Color.WHITE)
+            when (val r = rows()[p]) {
+                is Triple<*, *, *> -> {
+                    icon.setImageResource(R.drawable.ic_launcher)
+                    name.text = r.first as String
+                    sub.text = r.second as String
+                }
+                UpRow -> {
+                    icon.setImageResource(R.drawable.ic_folder)
+                    name.text = ".. (상위 폴더)"
+                    sub.text = ""
+                }
+                is Entry -> {
+                    icon.setImageResource(if (r.dir) R.drawable.ic_folder else R.drawable.ic_file)
+                    name.text = r.name
+                    val date = if (r.mtime > 0) fmt.format(Date(r.mtime)) else ""
+                    sub.text = if (r.dir) date else "$date   ${size(r.size)}"
+                    if (r.path in selected) row.setBackgroundColor(Color.rgb(205, 225, 250))
+                }
             }
             return row
         }
@@ -356,7 +509,6 @@ class BrowseActivity : Activity() {
 
     // ───────────── 작업 ─────────────
 
-    /** 오래 걸리는 작업: 진행 상황을 아래 줄에 보여 주고, 취소 가능 */
     private fun job(work: ((String) -> Unit) -> Unit, after: () -> Unit) {
         if (busy) { msg("앞 작업이 끝난 뒤에 해 주세요"); return }
         busy = true
@@ -382,27 +534,113 @@ class BrowseActivity : Activity() {
         }
     }
 
-    private val pickReq = 11
+    private fun checkCancel() { if (cancel.get()) throw Exception("취소") }
 
-    private fun pick() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    /** 붙여넣기: 같은 기기 안이면 복사/이동, 다른 기기면 주고받기 */
+    private fun paste() {
+        val cl = clip ?: return
+        val dest = fs ?: return
+        val dir = curPath[tab] ?: return
+        val existing = items.map { it.name }.toSet()
+
+        // 공유로 받은 파일
+        if (cl.uris.isNotEmpty()) {
+            val srcs = cl.uris.map { describe(it) }
+            confirmOverwrite(srcs.map { it.name }.filter { it in existing }) { overwrite ->
+                val todo = if (overwrite) srcs else srcs.filter { it.name !in existing }
+                clip = null
+                job({ report -> sendUris(todo, dest, dir, report) }) { go(dir, todo.firstOrNull()?.name) }
+            }
+            return
         }
-        @Suppress("DEPRECATION")
-        startActivityForResult(i, pickReq)
+
+        val sameDevice = cl.fromTab == tab && cl.fs === dest
+        if (sameDevice) {
+            clip = if (cl.move) null else cl
+            job({ report ->
+                val names = existing.toMutableSet()
+                cl.items.forEachIndexed { i, e ->
+                    checkCancel()
+                    report("${if (cl.move) "옮기는 중" else "복사 중"} ${i + 1}/${cl.items.size}: ${e.name}")
+                    if (dir == e.path || dir.startsWith(e.path.trimEnd('/') + "/")) throw Exception("폴더를 자기 안으로 넣을 수 없어요")
+                    if (cl.move) {
+                        if (RemoteApi.parent(e.path) != dir) {
+                            if (e.name in names) throw Exception("'${e.name}' 같은 이름이 이미 있어요")
+                            dest.rename(e.path, RemoteApi.join(dir, e.name))
+                            names += e.name
+                        }
+                    } else {
+                        val n = uniqueName(e, names)
+                        dest.copy(e.path, RemoteApi.join(dir, n))
+                        names += n
+                    }
+                }
+            }) { reload() }
+            return
+        }
+
+        // 다른 기기로: 같은 이름 확인 후 주고받기
+        val src = cl.fs ?: return
+        confirmOverwrite(cl.items.map { it.name }.filter { it in existing }) { overwrite ->
+            val todo = if (overwrite) cl.items else cl.items.filter { it.name !in existing }
+            clip = null
+            job({ report ->
+                transfer(src, todo, dest, dir, report)
+                if (cl.move) todo.forEach { checkCancel(); report("원래 자리에서 지우는 중: ${it.name}"); src.delete(it.path) }
+            }) { go(dir, todo.firstOrNull()?.name) }
+        }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        @Suppress("DEPRECATION")
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != pickReq || resultCode != RESULT_OK || data == null) return
-        val uris = mutableListOf<Uri>()
-        data.clipData?.let { c -> for (i in 0 until c.itemCount) uris += c.getItemAt(i).uri }
-        if (uris.isEmpty()) data.data?.let { uris += it }
-        if (uris.isNotEmpty()) upload(uris)
+    private fun uniqueName(e: Entry, names: Set<String>): String {
+        if (e.name !in names) return e.name
+        val dot = e.name.lastIndexOf('.')
+        val stem = if (!e.dir && dot > 0) e.name.substring(0, dot) else e.name
+        val ext = if (!e.dir && dot > 0) e.name.substring(dot) else ""
+        var n = "$stem - 복사본$ext"
+        var k = 2
+        while (n in names) n = "$stem - 복사본 (${k++})$ext"
+        return n
+    }
+
+    private fun confirmOverwrite(dups: List<String>, then: (Boolean) -> Unit) {
+        if (dups.isEmpty()) { then(true); return }
+        AlertDialog.Builder(this)
+            .setTitle("같은 이름이 있어요")
+            .setMessage("${dups.size}개가 이미 있어요." + (if (dups.size == 1) "\n(${dups[0]})" else ""))
+            .setPositiveButton("덮어쓰기") { _, _ -> then(true) }
+            .setNegativeButton("건너뛰기") { _, _ -> then(false) }
+            .setNeutralButton("취소", null)
+            .show()
+    }
+
+    /** 내 폰 ↔ 상대 기기 주고받기 (폴더는 안까지) */
+    private fun transfer(src: Fs, sel: List<Entry>, dest: Fs, dir: String, report: (String) -> Unit) {
+        report("보낼 파일 확인 중…")
+        val dirs = mutableListOf<String>()
+        val files = mutableListOf<Pair<Entry, String>>()   // 원본, 받는 쪽 경로
+        fun walk(e: Entry, target: String) {
+            checkCancel()
+            if (e.dir) {
+                dirs += target
+                src.list(e.path).forEach { c -> walk(c, RemoteApi.join(target, c.name)) }
+            } else files += e to target
+        }
+        sel.forEach { e -> walk(e, RemoteApi.join(dir, e.name)) }
+        dirs.forEach { d -> checkCancel(); dest.mkdir(d) }
+        val total = files.sumOf { it.first.size }.coerceAtLeast(1)
+        var done = 0L
+        val verb = if (src is LocalFs) "보내는 중" else "받는 중"
+        files.forEachIndexed { i, (e, target) ->
+            checkCancel()
+            val tick: (Int) -> Unit = { n -> done += n; report("$verb ${i + 1}/${files.size}: ${e.name}  ${done * 100 / total}%") }
+            when {
+                src is LocalFs && dest is RemoteFs ->
+                    src.input(e.path).use { inp -> dest.api.upload(target, inp, e.size, e.mtime, tick, cancel) }
+                src is RemoteFs && dest is LocalFs ->
+                    dest.receive(target, e.mtime) { out -> src.api.download(e.path, out, tick, cancel) }
+                else -> throw Exception("이 방향은 아직 지원하지 않아요")
+            }
+        }
     }
 
     private data class Src(val uri: Uri, val name: String, val size: Long)
@@ -421,145 +659,73 @@ class BrowseActivity : Activity() {
         return Src(u, name.replace('/', '_'), size)
     }
 
-    private fun upload(uris: List<Uri>) {
-        val a = api ?: return
-        val dir = cur ?: return
-        val srcs = uris.map { describe(it) }
-        val exist = items.map { it.name }.toSet()
-        val dup = srcs.filter { it.name in exist }
-        fun start(list: List<Src>) {
-            if (list.isEmpty()) return
-            job({ report ->
-                val total = list.sumOf { maxOf(it.size, 0) }
-                var done = 0L
-                list.forEachIndexed { i, s ->
-                    if (cancel.get()) throw Exception("취소")
-                    // 크기를 모르는 파일은 잠깐 폰 안에 복사해서 크기를 알아낸 뒤 보냄
-                    val tmp: File? = if (s.size >= 0) null else File(cacheDir, "up.tmp").also { t ->
-                        contentResolver.openInputStream(s.uri)!!.use { inp -> FileOutputStream(t).use { o -> inp.copyTo(o) } }
+    private fun sendUris(todo: List<Src>, dest: Fs, dir: String, report: (String) -> Unit) {
+        todo.forEachIndexed { i, s ->
+            checkCancel()
+            report("보내는 중 ${i + 1}/${todo.size}: ${s.name}")
+            val target = RemoteApi.join(dir, s.name)
+            if (dest is LocalFs) {
+                dest.receive(target, 0) { out -> contentResolver.openInputStream(s.uri)!!.use { inp -> inp.copyTo(out) } }
+            } else if (dest is RemoteFs) {
+                // 크기를 모르는 파일은 잠깐 폰 안에 복사해서 크기를 알아낸 뒤 보냄
+                val tmp: File? = if (s.size >= 0) null else File(cacheDir, "up.tmp").also { t ->
+                    contentResolver.openInputStream(s.uri)!!.use { inp -> t.outputStream().use { o -> inp.copyTo(o) } }
+                }
+                val len = tmp?.length() ?: s.size
+                try {
+                    (tmp?.inputStream() ?: contentResolver.openInputStream(s.uri)!!).use { inp ->
+                        var done = 0L
+                        dest.api.upload(target, inp, len, 0, { n ->
+                            done += n
+                            report("보내는 중 ${i + 1}/${todo.size}: ${s.name}  ${if (len > 0) done * 100 / len else 0}%")
+                        }, cancel)
                     }
-                    val len = tmp?.length() ?: s.size
-                    try {
-                        val input = tmp?.inputStream() ?: contentResolver.openInputStream(s.uri)!!
-                        input.use { inp ->
-                            a.upload(RemoteApi.join(dir, s.name), inp, len, 0, { n ->
-                                done += n
-                                val pct = if (total > 0) " ${done * 100 / total}%" else ""
-                                report("올리는 중 ${i + 1}/${list.size}: ${s.name}$pct")
-                            }, cancel)
-                        }
-                    } finally {
-                        tmp?.delete()
-                    }
-                }
-            }) { go(dir, list.firstOrNull()?.name) }
-        }
-        if (dup.isEmpty()) { start(srcs); return }
-        AlertDialog.Builder(this)
-            .setTitle("같은 이름이 있어요")
-            .setMessage("${dup.size}개가 이미 있어요." + (if (dup.size == 1) "\n(${dup[0].name})" else ""))
-            .setPositiveButton("덮어쓰기") { _, _ -> start(srcs) }
-            .setNegativeButton("건너뛰기") { _, _ -> start(srcs - dup.toSet()) }
-            .setNeutralButton("취소", null)
-            .show()
-    }
-
-    /** 폰의 '다운로드/이북 링크' 폴더에 저장 */
-    private fun download(sel: List<RemoteApi.Item>, open: Boolean) {
-        val a = api ?: return
-        var firstUri: Uri? = null
-        job({ report ->
-            // 받을 파일 목록 만들기 (폴더는 안까지)
-            val files = mutableListOf<Pair<RemoteApi.Item, String>>()   // 항목, 폰 안 하위 폴더
-            fun walk(it: RemoteApi.Item, sub: String) {
-                if (cancel.get()) throw Exception("취소")
-                if (it.dir) a.list(it.path).forEach { c -> walk(c, if (sub.isEmpty()) it.name else "$sub/${it.name}") }
-                else files += it to sub
-            }
-            report("받을 파일 확인 중…")
-            sel.forEach { walk(it, "") }
-            val total = files.sumOf { it.first.size }
-            var done = 0L
-            files.forEachIndexed { i, (it, sub) ->
-                if (cancel.get()) throw Exception("취소")
-                val (uri, out) = openOut(it.name, sub)
-                if (firstUri == null) firstUri = uri
-                out.use { o ->
-                    a.download(it.path, o, { n ->
-                        done += n
-                        val pct = if (total > 0) " ${done * 100 / total}%" else ""
-                        report("받는 중 ${i + 1}/${files.size}: ${it.name}$pct")
-                    }, cancel)
-                }
-            }
-        }) {
-            if (!cancel.get()) {
-                status.text = "폰의 '다운로드/이북 링크' 폴더에 저장했어요"
-                if (open) firstUri?.let { u ->
-                    runCatching {
-                        startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(u, contentResolver.getType(u) ?: "*/*")
-                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
-                    }.onFailure { msg("이 파일을 열 앱이 없어요") }
-                }
-                selected.clear(); render()
+                } finally { tmp?.delete() }
             }
         }
     }
 
-    private fun openOut(name: String, sub: String): Pair<Uri, OutputStream> {
-        val rel = "이북 링크" + (if (sub.isEmpty()) "" else "/$sub")
-        if (Build.VERSION.SDK_INT >= 29) {
-            val v = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/" + rel)
-            }
-            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)
-                ?: throw Exception("저장할 수 없어요")
-            return uri to contentResolver.openOutputStream(uri)!!
-        }
-        @Suppress("DEPRECATION")
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), rel).apply { mkdirs() }
-        val f = File(dir, name)
-        return Uri.fromFile(f) to FileOutputStream(f)
-    }
-
-    private fun delete(sel: List<RemoteApi.Item>) {
-        val a = api ?: return
+    private fun delete(sel: List<Entry>) {
+        val f = fs ?: return
+        val where = if (tab == 0) "내 폰" else (remote?.title ?: "상대 기기")
         val what = if (sel.size == 1) "'${sel[0].name}'" else "${sel.size}개 항목"
         AlertDialog.Builder(this)
             .setTitle("삭제")
-            .setMessage("$what 을(를) 이북리더에서 완전히 지울까요?\n(휴지통으로 가지 않아요)")
+            .setMessage("$where 에서 $what 을(를) 완전히 지울까요?\n(휴지통으로 가지 않아요)")
             .setPositiveButton("지우기") { _, _ ->
+                selectMode = false; selected.clear()
                 job({ report ->
-                    sel.forEachIndexed { i, it ->
-                        if (cancel.get()) throw Exception("취소")
-                        report("지우는 중 ${i + 1}/${sel.size}: ${it.name}")
-                        a.delete(it.path)
-                    }
+                    sel.forEachIndexed { i, e -> checkCancel(); report("지우는 중 ${i + 1}/${sel.size}: ${e.name}"); f.delete(e.path) }
                 }) { reload() }
             }
             .setNegativeButton("아니요", null)
             .show()
     }
 
-    private fun rename(item: RemoteApi.Item) {
-        val a = api ?: return
-        askText("이름 바꾸기", item.name) { name ->
-            if (name == item.name) return@askText
+    private fun rename(e: Entry) {
+        val f = fs ?: return
+        askText("이름 바꾸기", e.name) { name ->
+            if (name == e.name) return@askText
             if (name.contains('/')) { msg("이름에 / 는 쓸 수 없어요"); return@askText }
-            job({ _ -> a.rename(item.path, RemoteApi.join(RemoteApi.parent(item.path), name)) }) { cur?.let { c -> go(c, name) } }
+            job({ _ -> f.rename(e.path, RemoteApi.join(RemoteApi.parent(e.path), name)) }) { curPath[tab]?.let { c -> go(c, name) } }
         }
     }
 
     private fun newFolder() {
-        val a = api ?: return
-        val dir = cur ?: return
+        val f = fs ?: return
+        val dir = curPath[tab] ?: return
         val names = items.map { it.name }.toSet()
         var def = "새 폴더"
         var n = 2
         while (def in names) def = "새 폴더 (${n++})"
-        askText("새 폴더", def) { name ->
-            job({ _ -> a.mkdir(RemoteApi.join(dir, name)) }) { go(dir, name) }
+        askText("새 폴더", def) { name -> job({ _ -> f.mkdir(RemoteApi.join(dir, name)) }) { go(dir, name) } }
+    }
+
+    private fun askAllFiles() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+            }.onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
         }
     }
 
@@ -588,7 +754,7 @@ class BrowseActivity : Activity() {
     }
 
     private fun msg(t: String) {
-        AlertDialog.Builder(this).setMessage(t).setPositiveButton("확인", null).show()
+        if (!isFinishing) AlertDialog.Builder(this).setMessage(t).setPositiveButton("확인", null).show()
     }
 
     private fun size(b: Long): String = when {

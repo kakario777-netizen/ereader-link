@@ -34,7 +34,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         // 이 화면이 켜져 있는 동안은 화면이 꺼지지 않게 (꺼져도 연결은 유지됨)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window.statusBarColor = Color.WHITE
 
         val pad = dp(28)
         val root = LinearLayout(this).apply {
@@ -81,6 +80,7 @@ class MainActivity : Activity() {
                    "다른 앱으로 넘어가도 연결은 계속 유지돼요."
             setPadding(0, dp(30), 0, 0)
         })
+        Insets.apply(this, root)
         setContentView(root)
 
         if (Build.VERSION.SDK_INT >= 33 &&
