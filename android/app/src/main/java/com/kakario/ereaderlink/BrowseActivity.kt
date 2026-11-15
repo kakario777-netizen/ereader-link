@@ -151,6 +151,7 @@ class BrowseActivity : Activity() {
     }
 
     override fun onDestroy() {
+        Direct.leave(this)      // 화면을 나가면 원래 와이파이로
         finder?.stop()
         cancel.set(true)
         io.shutdownNow()
@@ -220,6 +221,7 @@ class BrowseActivity : Activity() {
     }
 
     private fun disconnect() {
+        Direct.leave(this)      // 다이렉트로 붙어 있었으면 원래 와이파이로
         remote = null
         curPath[1] = null
         if (clip?.fromTab == 1) clip = null
@@ -361,7 +363,7 @@ class BrowseActivity : Activity() {
         val r = remote
         styleTab(tabPhone, tab == 0)
         styleTab(tabRemote, tab == 1)
-        tabRemote.text = r?.title ?: if (devices.isEmpty()) "상대 기기 (찾는 중)" else "상대 기기"
+        tabRemote.text = r?.let { it.title + if (Direct.joined) " (다이렉트)" else "" } ?: if (devices.isEmpty()) "상대 기기 (찾는 중)" else "상대 기기"
 
         // 내장/외장 탭
         rootsRow.removeAllViews()
@@ -395,6 +397,7 @@ class BrowseActivity : Activity() {
         when {
             busy -> action("취소") { cancel.set(true) }
             f == null -> {
+                action("와이파이 다이렉트로 연결", bold = true) { joinDirect() }
                 action("IP로 연결") { askIp() }
                 action("다시 찾기") { startFinder(); render() }
             }
@@ -726,6 +729,35 @@ class BrowseActivity : Activity() {
             runCatching {
                 startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
             }.onFailure { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+        }
+    }
+
+    /** 공유기 없이 이북리더와 직접 연결 (이북리더에서 '와이파이 다이렉트 켜기'를 먼저) */
+    private fun joinDirect() {
+        if (!Direct.supported) { msg("와이파이 다이렉트는 안드로이드 10 이상에서만 돼요"); return }
+        if (!Direct.hasPermission(this)) { Direct.askPermission(this, 8); return }
+        if (!Direct.wifiOn(this)) {
+            msg("폰의 와이파이를 먼저 켜 주세요. 공유기에 연결 안 돼 있어도 괜찮아요.")
+            if (Build.VERSION.SDK_INT >= 29) runCatching { startActivity(Intent(Settings.Panel.ACTION_WIFI)) }
+            return
+        }
+        status.text = "와이파이 다이렉트로 이북리더에 연결하는 중… (최대 30초)"
+        Direct.join(this) { host, err ->
+            runOnUiThread {
+                if (host != null) {
+                    status.text = "다이렉트 연결됨 — 이북 링크에 접속하는 중…"
+                    // 그룹이 막 만들어진 직후라 잠깐 기다렸다 접속
+                    list.postDelayed({ connect(host, LinkState.HTTP_PORT, "이북리더 (다이렉트)") }, 1500)
+                } else status.text = err ?: "연결하지 못했어요"
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 8) {
+            if (Direct.hasPermission(this)) joinDirect()
+            else msg("와이파이 다이렉트를 쓰려면 '근처 기기'(또는 위치) 권한이 필요해요")
         }
     }
 

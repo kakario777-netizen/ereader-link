@@ -27,6 +27,7 @@ class MainActivity : Activity() {
     private lateinit var doing: TextView
     private lateinit var permBtn: Button
     private lateinit var updBtn: Button
+    private lateinit var directBtn: Button
     private lateinit var updText: TextView
     private var lastText = ""
 
@@ -61,6 +62,8 @@ class MainActivity : Activity() {
 
         permBtn = button("모든 파일 접근 허용하기") { askPermission() }
         root.addView(permBtn)
+        directBtn = button("와이파이 다이렉트 켜기") { toggleDirect() }
+        root.addView(directBtn)
         root.addView(button("다른 기기 열기 (폰 → 이북리더)") {
             startActivity(Intent(this, BrowseActivity::class.java))
         })
@@ -72,6 +75,7 @@ class MainActivity : Activity() {
         updText = label(16f)
         root.addView(updText)
         root.addView(button("끄고 나가기") {
+            Direct.stopHost(this)
             startService(Intent(this, LinkService::class.java).setAction(LinkService.ACTION_STOP))
             finishAndRemoveTask()
         })
@@ -102,6 +106,22 @@ class MainActivity : Activity() {
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
         gravity = Gravity.CENTER
+    }
+
+    /** 공유기 없이 폰과 직접 연결 — 다 쓰면 끄면 원래 와이파이로 돌아감 */
+    private fun toggleDirect() {
+        if (Direct.hosting) { Direct.stopHost(this); lastText = ""; refresh(); return }
+        if (!Direct.hasPermission(this)) { Direct.askPermission(this, 7); return }
+        if (!Direct.wifiOn(this)) { Direct.hostStatus = "와이파이를 먼저 켜 주세요 (공유기에 연결 안 돼 있어도 괜찮아요)"; lastText = ""; refresh(); return }
+        Direct.startHost(this) { runOnUiThread { lastText = ""; refresh() } }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 7) {
+            if (Direct.hasPermission(this)) toggleDirect()
+            else { Direct.hostStatus = "와이파이 다이렉트를 쓰려면 '근처 기기'(또는 위치) 권한이 필요해요"; lastText = ""; refresh() }
+        }
     }
 
     private fun askPermission() {
@@ -153,17 +173,20 @@ class MainActivity : Activity() {
         val s = when {
             LinkState.error != null && !LinkState.connected -> "문제가 생겼어요"
             !allOk -> "권한이 필요해요"
-            LinkState.connected -> "PC와 연결됨"
-            else -> "PC를 기다리는 중"
+            LinkState.connected -> "연결됨"
+            else -> "연결을 기다리는 중"
         }
         val ips = Discovery.localIps()
         val d = buildString {
             if (!allOk) append("아래 버튼을 눌러 '모든 파일 접근'을 켜 주세요.\n")
-            if (LinkState.connected) append("PC: ${LinkState.pcAddress}\n")
+            if (LinkState.connected) append("연결된 기기: ${LinkState.pcAddress}\n")
             append("이 기기: ${FileServer.deviceName()}  (빌드 #${Updater.currentBuild(this@MainActivity)})\n")
             append(if (ips.isEmpty()) "와이파이가 연결돼 있지 않아요" else "IP: ${ips.joinToString(", ")}")
             LinkState.error?.let { append("\n$it") }
+            Direct.hostStatus?.let { append("\n$it") }
         }
+        val dt = if (Direct.hosting) "와이파이 다이렉트 끄기 (원래 와이파이로)" else "와이파이 다이렉트 켜기"
+        if (directBtn.text.toString() != dt) directBtn.text = dt
         val act = LinkState.activity
         val g = if (act != null && System.currentTimeMillis() - LinkState.activityAt < 15000) act else ""
         // 이잉크는 화면이 바뀔 때마다 깜빡이므로, 내용이 같으면 다시 그리지 않음
