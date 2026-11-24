@@ -17,7 +17,7 @@ namespace EreaderLink
     /// </summary>
     static class Updater
     {
-        const string Api = "https://api.github.com/repos/kakario777-netizen/ereader-link/releases/tags/latest";
+        const string Api = "https://api.github.com/repos/kakario777-netizen/ereader-link-release/releases/latest";
 
         public class Release { public int Build; public string Url; public long Size; }
 

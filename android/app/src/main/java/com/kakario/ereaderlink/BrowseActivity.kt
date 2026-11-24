@@ -741,8 +741,16 @@ class BrowseActivity : Activity() {
             if (Build.VERSION.SDK_INT >= 29) runCatching { startActivity(Intent(Settings.Panel.ACTION_WIFI)) }
             return
         }
+        askText("이북리더 화면에 나온 다이렉트 코드 8자리", "", number = true) { t ->
+            val code = t.filter { it.isDigit() }
+            if (!Direct.validCode(code)) { msg("코드는 숫자 8자리예요"); return@askText }
+            joinDirectWith(code)
+        }
+    }
+
+    private fun joinDirectWith(code: String) {
         status.text = "와이파이 다이렉트로 이북리더에 연결하는 중… (최대 30초)"
-        Direct.join(this) { host, err ->
+        Direct.join(this, code) { host, err ->
             runOnUiThread {
                 if (host != null) {
                     status.text = "다이렉트 연결됨 — 이북 링크에 접속하는 중…"

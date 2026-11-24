@@ -22,7 +22,7 @@ import kotlin.concurrent.thread
  * 처음 한 번만 '이 출처 허용'과 '업데이트할까요?'가 나오고, 다음부터는 묻지 않음 (안드로이드 12 이상).
  */
 object Updater {
-    private const val API = "https://api.github.com/repos/kakario777-netizen/ereader-link/releases/tags/latest"
+    private const val API = "https://api.github.com/repos/kakario777-netizen/ereader-link-release/releases/latest"
 
     data class Release(val build: Int, val url: String, val size: Long)
 
