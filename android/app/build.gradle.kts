@@ -17,12 +17,13 @@ android {
     }
 
     signingConfigs {
-        // 고정 키 — 빌드마다 서명이 바뀌어 재설치가 필요해지는 문제 방지
+        // 서명 키는 GitHub Secrets에서 받음 (빌드할 때만 임시 파일로 풀림) — 키는 바꾸지 않고 같은 키 사용
         getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            val ks = System.getenv("SIGNING_KEYSTORE_PATH")
+            storeFile = if (!ks.isNullOrEmpty()) file(ks) else file("debug.keystore")
+            storePassword = System.getenv("SIGNING_STORE_PASSWORD")?.takeIf { it.isNotEmpty() } ?: "android"
+            keyAlias = System.getenv("SIGNING_KEY_ALIAS")?.takeIf { it.isNotEmpty() } ?: "androiddebugkey"
+            keyPassword = System.getenv("SIGNING_KEY_PASSWORD")?.takeIf { it.isNotEmpty() } ?: "android"
         }
     }
     buildTypes {

@@ -409,7 +409,14 @@ namespace EreaderLink
 
         static string LoadLast()
         {
-            try { return File.ReadAllText(Path.Combine(SettingsDir, "last.txt")).Trim(); } catch { return null; }
+            // 윈도우 사용자 계정으로 암호화해 둔 값 (DPAPI)
+            try
+            {
+                var enc = File.ReadAllBytes(Path.Combine(SettingsDir, "last.bin"));
+                return System.Text.Encoding.UTF8.GetString(
+                    System.Security.Cryptography.ProtectedData.Unprotect(enc, null, System.Security.Cryptography.DataProtectionScope.CurrentUser)).Trim();
+            }
+            catch { return null; }
         }
 
         static void SaveLast(string host)
@@ -417,7 +424,10 @@ namespace EreaderLink
             try
             {
                 Directory.CreateDirectory(SettingsDir);
-                File.WriteAllText(Path.Combine(SettingsDir, "last.txt"), host);
+                var enc = System.Security.Cryptography.ProtectedData.Protect(
+                    System.Text.Encoding.UTF8.GetBytes(host), null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(Path.Combine(SettingsDir, "last.bin"), enc);
+                try { File.Delete(Path.Combine(SettingsDir, "last.txt")); } catch { }   // 예전 평문 파일 정리
             }
             catch { }
         }

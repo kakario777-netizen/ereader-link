@@ -17,7 +17,9 @@ namespace EreaderLink
     /// </summary>
     static class Updater
     {
-        const string Api = "https://api.github.com/repos/kakario777-netizen/ereader-link-release/releases/latest";
+        // 업데이트 파일은 내 저장소 릴리스에서만 HTTPS로 받음
+        const string Allowed = "https://github.com/kakario777-netizen/ereader-link/releases/download/";
+        const string Api = "https://api.github.com/repos/kakario777-netizen/ereader-link/releases/tags/latest";
 
         public class Release { public int Build; public string Url; public long Size; }
 
@@ -52,8 +54,9 @@ namespace EreaderLink
                 {
                     var a = (Dictionary<string, object>)o;
                     var name = a["name"] as string ?? "";
-                    if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                        return new Release { Build = build, Url = (string)a["browser_download_url"], Size = Convert.ToInt64(a["size"]) };
+                    var url = a["browser_download_url"] as string ?? "";
+                    if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && url.StartsWith(Allowed, StringComparison.Ordinal))
+                        return new Release { Build = build, Url = url, Size = Convert.ToInt64(a["size"]) };
                 }
             }
             catch { }

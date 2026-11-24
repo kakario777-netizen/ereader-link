@@ -22,7 +22,10 @@ import kotlin.concurrent.thread
  * 처음 한 번만 '이 출처 허용'과 '업데이트할까요?'가 나오고, 다음부터는 묻지 않음 (안드로이드 12 이상).
  */
 object Updater {
-    private const val API = "https://api.github.com/repos/kakario777-netizen/ereader-link-release/releases/latest"
+    private const val API = "https://api.github.com/repos/kakario777-netizen/ereader-link/releases/tags/latest"
+
+    // 업데이트 파일은 내 저장소 릴리스에서만 HTTPS로 받음
+    private const val ALLOWED = "https://github.com/kakario777-netizen/ereader-link/releases/download/"
 
     data class Release(val build: Int, val url: String, val size: Long)
 
@@ -147,7 +150,8 @@ object Updater {
         val assets = json.optJSONArray("assets") ?: return null
         for (i in 0 until assets.length()) {
             val a = assets.getJSONObject(i)
-            if (a.optString("name").endsWith(".apk")) return Release(build, a.getString("browser_download_url"), a.optLong("size"))
+            val url = a.getString("browser_download_url")
+            if (a.optString("name").endsWith(".apk") && url.startsWith(ALLOWED)) return Release(build, url, a.optLong("size"))
         }
         return null
     }

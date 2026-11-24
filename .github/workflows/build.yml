@@ -1,12 +1,14 @@
 name: Build
 
+# 릴리스할 때만 빌드: 'v'로 시작하는 태그를 올리거나, Actions 화면에서 직접 실행할 때
+# (풀 리퀘스트로는 실행되지 않음 → 외부인이 빌드·Secrets를 쓸 수 없음)
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build
@@ -14,6 +16,7 @@ concurrency:
 
 jobs:
   android:
+    if: github.repository_owner == 'kakario777-netizen'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -24,26 +27,45 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      # Gradle 빌드 캐시 사용
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.11.1
+      - name: Signing key from Secrets
+        env:
+          KS_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/app.keystore"
+            echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/app.keystore" >> "$GITHUB_ENV"
+            echo "서명 키: Secrets 사용"
+          else
+            echo "서명 키: Secrets 없음 — 저장소 안 키 사용"
+          fi
       - name: Build APK
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           set -o pipefail
-          gradle assembleDebug --no-daemon 2>&1 | tee build.log
+          gradle assembleDebug --no-daemon --build-cache 2>&1 | tee build.log
       - name: Report build errors
         if: failure()
         run: |
           grep -E "^e: |error:|What went wrong|FAILURE|Unresolved|Exception" build.log | head -60 > errors.txt || true
           msg=$(sed 's/%/%25/g' errors.txt | sed ':a;N;$!ba;s/\n/%0A/g')
           echo "::error title=android-errors::${msg}"
-      - run: cp app/build/outputs/apk/debug/app-debug.apk ../ereader-link-${{ github.run_number }}.apk
+      - run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ../ereader-link-${{ github.run_number }}.apk
+          rm -f "$RUNNER_TEMP/app.keystore"
       - uses: actions/upload-artifact@v4
         with:
           name: apk
           path: ereader-link-${{ github.run_number }}.apk
 
   windows:
+    if: github.repository_owner == 'kakario777-netizen'
     runs-on: windows-latest
     defaults:
       run:
@@ -51,6 +73,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ hashFiles('pc/*.csproj') }}
       - name: Build exe
         run: |
           set -o pipefail
@@ -70,6 +96,8 @@ jobs:
   release:
     needs: [android, windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -82,5 +110,5 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest ereader-link-${{ github.run_number }}.apk EreaderLink-${{ github.run_number }}.exe \
             --title "최신 빌드 #${{ github.run_number }}" \
-            --notes "이북리더: ereader-link-${{ github.run_number }}.apk 설치 / PC: EreaderLink-${{ github.run_number }}.exe 실행 (설치 없이 바로 실행). 둘을 같은 와이파이에 두고 켜면 자동으로 연결돼요." \
+            --notes "이북리더·폰: ereader-link-${{ github.run_number }}.apk 설치 / PC: EreaderLink-${{ github.run_number }}.exe 실행 (설치 없이 바로 실행). 같은 와이파이에 두고 켜면 자동으로 연결돼요." \
             --target ${{ github.sha }}

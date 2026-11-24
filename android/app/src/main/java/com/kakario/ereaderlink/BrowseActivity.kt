@@ -133,7 +133,12 @@ class BrowseActivity : Activity() {
 
         readShared(intent)
         startFinder()
-        getSharedPreferences("browse", MODE_PRIVATE).getString("last", null)?.let { tryConnectQuiet(it) }
+        // 예전 버전이 평문으로 저장한 IP는 암호화 저장소로 옮기고 지움
+        getSharedPreferences("browse", MODE_PRIVATE).let { old ->
+            old.getString("last", null)?.let { SecureStore.put(this, "last", it) }
+            old.edit().clear().apply()
+        }
+        SecureStore.get(this, "last")?.let { tryConnectQuiet(it) }
         // 공유로 들어왔으면 상대 기기 탭부터
         switchTab(if (clip?.uris?.isNotEmpty() == true) 1 else 0)
         Updater.check(this)
@@ -214,7 +219,7 @@ class BrowseActivity : Activity() {
     private fun connected(a: RemoteApi, inf: RemoteApi.Info) {
         remote = RemoteFs(a, inf)
         curPath[1] = null
-        getSharedPreferences("browse", MODE_PRIVATE).edit().putString("last", a.host).apply()
+        SecureStore.put(this, "last", a.host)
         status.text = ""
         if (!inf.allAccess) msg("${inf.name}의 이북 링크 앱에서 '모든 파일 접근 허용하기'를 켜 주세요. 안 켜면 폴더가 비어 보일 수 있어요.")
         if (tab == 1) openTab() else render()
@@ -770,7 +775,7 @@ class BrowseActivity : Activity() {
     }
 
     private fun askIp() {
-        askText("IP로 연결", getSharedPreferences("browse", MODE_PRIVATE).getString("last", "") ?: "", number = true) { t ->
+        askText("IP로 연결", SecureStore.get(this, "last") ?: "", number = true) { t ->
             val host = t.substringBefore(':')
             val port = t.substringAfter(':', "").toIntOrNull() ?: LinkState.HTTP_PORT
             connect(host, port, host)
